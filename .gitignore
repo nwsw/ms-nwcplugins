@@ -1,6 +1,9 @@
+/**
 !.gitignore
 !.gitattributes
 !README.md
+
+# 2015 objects for 2.75
 !Arpeggio.ms.nwcuser.lua
 !GuitarChord.ms.nwcuser.lua
 !Ottavamatic.ms.nwcuser.lua
@@ -8,3 +11,12 @@
 !Tremolo.ms.nwcuser.lua
 !TremoloSingle.ms.nwcuser.lua
 !VerseNumbers.ms.nwcuser.lua
+
+# 2016 additions for 2.75a
+!Acciaciatura.ms.nwcuser.lua
+!BarLabel.ms.nwcuser.lua
+!Brace.ms.nwcuser.lua
+!CueHeads.ms.nwcuser.lua
+!Glissando.ms.nwcuser.lua
+!Trill.ms.nwcuser.lua
+!Ukulele.ms.nwcuser.lua
