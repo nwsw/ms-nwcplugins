@@ -1,4 +1,4 @@
--- Version 1.0
+-- Version 2.0a
 
 --[[----------------------------------------------------------------
 This plugin creates two-note tremolo markings. It draws the markings, and will optionally play the notes in tremolo style.
@@ -26,20 +26,88 @@ Enables playback of the tremolo. The default setting is enabled (checked).
 Note that the tremolo RestChords should be muted for proper playback.
 @TripletPlayback
 Specifies that the playback notes should be in triplet rhythm. This will generally be used when the tremolo notes are dotted. The default setting is disabled (unchecked).
+@Variance
+Specifies a dynamic variance between the first and second chord. The specified value is a multiplier for the
+volume of the second note. This allows more realistic playback. The range of values is 50% to 200%, and the default setting is 100% (no variance).
 --]]----------------------------------------------------------------
+
+if nwcut then
+	local userObjTypeName = arg[1]
+	local score = nwcut.loadFile()
+	local beams = nwcut.prompt('Number of Beams:', '#[1,4]', 3)
+	local firstNote = true
+	local noteDurBase = { 'Whole', 'Half', '4th', '8th' }
+	local noteDurBaseRev = {}
+
+	for i,s in ipairs(noteDurBase) do
+		noteDurBaseRev[s] = i
+	end
+
+	local function parseDur(durTable)
+		local dur, dot
+		for v in pairs(durTable) do
+			dot = dot or (v == 'Dotted' or v == 'DblDotted') and v
+			dur = dur or noteDurBaseRev[v] and v
+		end
+		return dur, dot
+	end
+	
+	local function applyTremolo(o)
+		if o:IsFake() then return end
+		local opts, stemDir, dot, duration		
+		if o:ContainsNotes() and not o:Is('RestChord') and not o.Opts.Dur2 then -- don't convert rest chords or split voice chords
+			local o1 = nwcItem.new('|RestChord')
+			opts = o:Provide('Opts')
+			stemDir = (opts.Stem or 'Up') == 'Up' and 'Down' or 'Up'
+			duration, dot = parseDur(o.Opts.Dur)
+			if duration then
+				local newDur = noteDurBase[noteDurBaseRev[duration]+1] or '16th'
+				o1.Opts.Dur2 = o.Opts.Dur
+				o1.Opts.Dur2[duration] = nil
+				if duration == '8th' then duration = '4th' end
+				o1.Opts.Dur2[duration] = ''
+				o1:Provide('Dur', newDur)
+				o1:Provide('Opts', opts)
+				o1.Opts.Opts.Stem = stemDir
+				o1.Opts.Opts.HideRest = ''
+				o1.Opts.Opts.Muted = ''
+				o1:Provide('Pos2', o.Opts.Pos)
+				firstNote = not firstNote
+				if not firstNote then
+					local o2 = nwcItem.new('|User|' .. userObjTypeName)
+					o2.Opts.Pos = 0
+					o2.Opts.Beams = beams
+					if dot then o2.Opts.TripletPlayback = 'Y' end
+					return { o1, o2 }
+				else
+					return { o1 }
+				end
+			end
+		end
+	end
+	
+	score:forSelection(applyTremolo)
+	score:save()
+	return
+end
 
 local user = nwcdraw.user
 local nextNote = nwc.drawpos.new()
 local priorNote = nwc.drawpos.new()
 
-local spec_Tremolo = {
+local _nwcut = {
+	['Apply'] = 'ClipText',
+}
+
+local _spec = {
 	{ id='Beams', label='Number of Beams', type='int', default=3, min=1, max=4 },
 	{ id='Style', label='Half Note Beam Style', type='int', default=1, min=1, max=3 },
 	{ id='Play', label='Play Notes', type='bool', default=true },
-	{ id='TripletPlayback', label='Triplet Playback', type='bool', default=false }
+	{ id='TripletPlayback', label='Triplet Playback', type='bool', default=false },
+	{ id='Variance', label='Variance (%)', type='int', default=100, min=50, max=200, step=5 },
 }
 
-local function draw_Tremolo(t)
+local function _draw(t)
 	local _, my = nwcdraw.getMicrons()
 	local stemWeight = my*0.0126
 	local beams = t.Beams
@@ -66,11 +134,9 @@ local function draw_Tremolo(t)
 
 	local function drawBeam(x, y)
 		local xs, ys, bs = x*slope, y*stemDir, beamHeight*stemDir
-		nwcdraw.moveTo(x1s+x, y1s+xs-ys)
+		nwcdraw.moveTo(x2s-x, y2s-xs-ys)
 		nwcdraw.beginPath()
-		nwcdraw.line(x2s-x, y2s-xs-ys)
-		nwcdraw.line(x2s-x, y2s-xs-ys-bs)
-		nwcdraw.line(x1s+x, y1s+xs-ys-bs)
+		nwcdraw.lineBy(0, -bs, x1s-x2s+2*x, y1s-y2s+2*xs, 0, bs)
 		nwcdraw.closeFigure()
 		nwcdraw.endPath()
 	end
@@ -95,31 +161,35 @@ local function draw_Tremolo(t)
 	end
 end
 
-local _play = {nwc.ntnidx.new(), nwc.ntnidx.new()}
-local function play_Tremolo(t)
+local play = { nwc.ntnidx.new(), nwc.ntnidx.new() }
+local function _play(t)
 	if not t.Play then return end
 	local dur = nwcplay.PPQ / 2^t.Beams * (t.TripletPlayback and 2/3 or 1)
-	_play[2]:find('next', 'note')
-	_play[2]:find('next')
-	local fini, i = _play[2]:sppOffset() - 1
-	_play[1]:find('prior', 'note')
-	_play[2]:find('prior')
-	for spp = _play[1]:sppOffset(), fini, dur do
-		i = i==1 and 2 or 1
-		for j = 1, _play[i]:noteCount() or 0 do 
-			nwcplay.note(spp, dur, nwcplay.getNoteNumber(_play[i]:notePitchPos(j)))
+	play[2]:find('next', 'note')
+	play[2]:find('next')
+	local fini = play[2]:sppOffset() - 1
+	play[1]:find('prior', 'note')
+	play[2]:find('prior')
+	local defaultVel = nwcplay.getNoteVelocity()
+	local vel = { defaultVel, math.min(127, defaultVel * t.Variance/100) }
+	local i = 1
+	for spp = play[1]:sppOffset(), fini, dur do
+		for j = 1, play[i]:noteCount() or 0 do 
+			nwcplay.note(spp, dur, nwcplay.getNoteNumber(play[i]:notePitchPos(j)), vel[i])
 		end
+		i = 3 - i
 	end
 end
 
-local function spin_Tremolo(t, dir)
+local function _spin(t, dir)
 	t.Beams = t.Beams + dir
 	t.Beams = t.Beams
 end
 
 return {
-	spec = spec_Tremolo,
-    spin = spin_Tremolo,
-	draw = draw_Tremolo,
-	play = play_Tremolo
+	nwcut = _nwcut,
+	spec = _spec,
+	spin = _spin,
+	draw = _draw,
+	play = _play,
 }
