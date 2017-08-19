@@ -1,8 +1,8 @@
--- Version 2.0a
+-- Version 2.11
 
 --[[----------------------------------------------------------------
 This will draw a glissando line between two notes, with optional text above the line. If either of the notes is a chord, the bottom notehead
-of that chord will be the starting or ending point of the line. It is strictly an ornament, and has no effect on playback.
+of that chord will be the starting or ending point of the line.
 @Pen
 Specifies the type for lines: solid, dot, dash or wavy. The default setting is solid.
 @Text
@@ -21,8 +21,14 @@ This will adjust the auto-determined horizontal (X) position of the glissando's 
 This will adjust the auto-determined vertical (Y) position of the glissando's end point. The range of values is -100.00 to 100.00. The default setting is 0.
 @Weight
 This will adjust the weight (thickness) of both straight and wavy line types. The range of values is 0.0 to 5.0, where 1 is the standard line weight. The default setting is 1.
+@Playback
+This can be used to activate different optional forms of play back. Most play back methods are best when the target (left side) note is muted.
+PitchBend also supports muting the right side note, which will result in a seamless note event that bends from one pitch to the other.
+
+For PitchBend, the staff/instrument definition should establish a 24 semitone pitch bend. For best results, the note pair should also be within ±24 semitones.
 --]]----------------------------------------------------------------
 
+local userObjTypeName = ...
 local nextNote, priorNote = nwc.drawpos.new(), nwc.drawpos.new()
 local nextNoteidx, priorNoteidx = nwc.ntnidx.new(), nwc.ntnidx.new()
 local idx = nwc.ntnidx
@@ -32,15 +38,25 @@ local lineStyles = { 'solid', 'dot', 'dash', 'wavy' }
 local squig = '~'
 local showBoxes = { edit=true }
 
+local PlaybackStyle = {'None','Chromatic','WhiteKeys', 'BlackKeys', 'PitchBend'}
+local KeyIntervals = {
+	None = {},
+	Chromatic = {0,1,2,3,4,5,6,7,8,9,10,11},
+	WhiteKeys = {0,2,4,5,7,9,11},
+	BlackKeys = {1,3,6,8,10},
+	PitchBend = {24},
+}
+
 local _spec = {
 	{ id='Pen', label='Line Style', type='enum', default=lineStyles[1], list=lineStyles },
 	{ id='Text', label='Text', type='text', default='gliss.' },
-    { id='Scale', label='Text Scale (%)', type='int', min=5, max=400, step=5, default=75 },
-    { id='StartOffsetX', label='Start Offset X', type='float', step=0.1, min=-100, max=100, default=0 },
+	{ id='Scale', label='Text Scale (%)', type='int', min=5, max=400, step=5, default=75 },
+	{ id='StartOffsetX', label='Start Offset X', type='float', step=0.1, min=-100, max=100, default=0 },
 	{ id='StartOffsetY', label='Start Offset Y', type='float', step=0.1, min=-100, max=100, default=0 },
 	{ id='EndOffsetX', label='End Offset X', type='float', step=0.1, min=-100, max=100, default=0 },
 	{ id='EndOffsetY', label='End Offset Y', type='float', step=0.1, min=-100, max=100, default=0 },
-	{ id='Weight', label='Line Weight', type='float', default=1, min=0, max=5, step=0.1 }
+	{ id='Weight', label='Line Weight', type='float', default=1, min=0, max=5, step=0.1 },
+	{ id='Playback', label='Pla&yback', type='enum', default=PlaybackStyle[1], list=PlaybackStyle },
 }
 
 local _spec2 = {}
@@ -53,10 +69,6 @@ local function _create(t)
 	t.Class = 'Span'
 end
 
-local function _span(t)
-	return 1
-end
-
 local function _audit(t)
 	if t.Style then
 		if (t.Style == 'Wavy') then t.Pen = 'wavy' end
@@ -64,7 +76,7 @@ local function _audit(t)
 	end
 	t.ap = nil
 	
-	local barSpan = (idx:find('span',_span(t)) or idx:find('last')) and idx:find('prior','bar') and (idx:indexOffset() > 0)
+	local barSpan = (idx:find('span', 1) or idx:find('last')) and idx:find('prior','bar') and (idx:indexOffset() > 0)
 	t.Class = barSpan and 'Span' or 'Standard'
 end
 
@@ -77,33 +89,24 @@ local function box(x, y, ap, p)
 	nwcdraw.endPath(m)
 end
 
-local function _draw(t)
-	local atSpanFront = not user:isAutoInsert()
-	
+local stopItems = { Note=1, Chord=1, RestChord=1, Rest=-1, Bar=-1, RestMultiBar=-1, Boundary=-1 }
+
+local function hasPriorTargetNote(idx)
+	while idx:find('prior') do
+		local d = stopItems[idx:objType()]
+		if d then return d > 0 end
+	end
+	return false
+end
+
+local function drawGliss(x1, y1, x2, y2, drawText, t)
 	local xyar = nwcdraw.getAspectRatio()
-    local _, my = nwcdraw.getMicrons()
+	local _, my = nwcdraw.getMicrons()
 	local pen, text, weight = t.Pen, t.Text, t.Weight
-	local thickness = my*.3*weight
-	local xo, yo = .25, .5
-	
-	local atSpanEnd = nextNote:find('span',_span(t))
-	if not atSpanEnd then nextNote:find('last') end
-	priorNote:find('prior', 'note')
-	
-	if not nextNoteidx:find('next', 'note') then return end
-	if not priorNoteidx:find('prior', 'note') then return end
-	
-	local x1 = atSpanFront and priorNote:xyRight() + xo + t.StartOffsetX or -1.25
-	local y1 = priorNoteidx:notePos(1)
-	
-	local x2 = (atSpanEnd and nextNote:xyAnchor() + t.EndOffsetX or 0) - xo 
-	local y2 = nextNoteidx:notePos(1)
-	
-    local s = y1>y2 and 1 or y1<y2 and -1 or 0
-	y1 = y1 - yo*s + t.StartOffsetY
-	y2 = y2 + yo*s + t.EndOffsetY
+
 	local angle = math.deg(math.atan2((y2-y1), (x2-x1)*xyar))
-	if atSpanFront and text ~= '' then
+	
+	if drawText and text ~= '' then
 		nwcdraw.alignText('bottom', 'center')
 		nwcdraw.setFontClass('StaffItalic')
 		nwcdraw.setFontSize(nwcdraw.getFontSize()*t.Scale*.01)
@@ -111,8 +114,8 @@ local function _draw(t)
 		nwcdraw.text(text, angle)
 	end
 	if pen ~= 'wavy' then
-		if thickness ~= 0 then
-			nwcdraw.setPen(pen, thickness)	
+		if weight ~= 0 then
+			nwcdraw.setPen(pen, my*.3*weight)	
 			nwcdraw.line(x1, y1, x2, y2)
 		end
 	else
@@ -125,10 +128,140 @@ local function _draw(t)
 		nwcdraw.moveTo(x1, y1-1)
 		nwcdraw.text(string.rep(squig, count), angle)
 	end
+end
+
+local function _draw(t)
+	local atSpanFront = not user:isAutoInsert()
+	local atSpanEnd = nextNoteidx:find('span', 1)
+	
+	if not hasPriorTargetNote(priorNoteidx) or not atSpanEnd then
+		if not atSpanFront then return 0 end
+		local x, y = -4, 4
+		if not nwcdraw.isDrawing() then return -x end
+		drawGliss(x, 0, 0, y, true, t)
+		return
+	end
+	if not nwcdraw.isDrawing() then return 0 end
+	
+	local xo, yo = .25, .5
+	
+	nextNote:find(nextNoteidx)
+	priorNote:find(priorNoteidx)
+	
+	if not atSpanEnd then nextNoteidx:find('last') end
+	local x1 = atSpanFront and priorNote:xyRight() + xo + t.StartOffsetX or -1.25
+	local y1 = priorNoteidx:notePos(1)
+	
+	local x2 = (atSpanEnd and nextNote:xyAnchor() + t.EndOffsetX or 0) - xo 
+	local y2 = nextNoteidx:notePos(1) or 0
+
+	local s = y1>y2 and 1 or y1<y2 and -1 or 0
+	y1 = y1 - yo*s + t.StartOffsetY
+	y2 = y2 + yo*s + t.EndOffsetY
+
+	drawGliss(x1, y1, x2, y2, atSpanFront, t)
+	
 	if t.ap and showBoxes[nwcdraw.getTarget()] then
 		local ap = tonumber(t.ap)
 		box(x1, y1, ap, 1)
 		box(x2, y2, ap, 2)
+	end
+end
+
+local function GlissOctaveNearestNextInterval(t, inOctaveSemiTone)
+	for i, v in ipairs(t) do
+		if v >= inOctaveSemiTone then return i-1 end
+	end
+	return 0
+end
+		
+local function CountGlissIntervals(k, v)
+	local o = math.floor(v/12)
+	local i = v % 12
+	
+	return #k*o + GlissOctaveNearestNextInterval(k, i)
+end
+
+local function GlissNoteFromInterval(k,v)
+	local opitches = #k
+	local o = math.floor(v/opitches)
+	local i = v % opitches
+	
+	return 12*o + k[i+1]
+end
+
+local function isStandAloneMutedNote(n)
+	return n:isMute() and not n:isTieIn() and not n:isTieOut()
+end
+
+-- function `partOfNextPlayGliss` has a side effect on `idx` so be careful when using it
+local function partOfNextPlayGliss(n)
+	if not idx:find(n) or not idx:find('next','noteOrRest') then return false end
+	return idx:find('prior','user',userObjTypeName,'Playback') and (idx:indexOffset() > 0)
+end
+
+local function _play(t)
+	local playbackt = t.Playback
+	local playback = KeyIntervals[playbackt]
+	if #playback < 1 then return end
+	
+	if not (hasPriorTargetNote(priorNoteidx) and nextNoteidx:find('span', 1)) then return end
+	local startSPP = priorNoteidx:sppOffset()
+	local dur = -startSPP
+	
+	local v1 = nwcplay.getNoteNumber(priorNoteidx:notePitchPos(1))
+	local v2 = nwcplay.getNoteNumber(nextNoteidx:notePitchPos(1))
+	if (not v1) or (not v2) or (v2 == v1) then return end
+
+	local inc = (v1<v2) and 1 or -1
+
+	if playbackt == 'PitchBend' then
+		-- this technique requires that the part have a dedicated midi channel and a 24 semitone pitch bend range
+		local pbRange = playback[1]
+		local deltav = math.min(math.abs(v1-v2),pbRange)
+		local pbStart,pbEnd = 0x02000,0x02000+inc*((0x01FFF*deltav)/pbRange)
+		
+		-- if the initiating note stands alone (is not tied) and is muted, then the note pitch bend can
+		-- be applied against the target pitch with a full note duration
+		if isStandAloneMutedNote(priorNoteidx) then
+			local noteDur = dur
+			pbStart,pbEnd = 0x02000-inc*((0x01FFF*deltav)/pbRange),0x02000
+			
+			-- allow the note pair to be connected together when both are stand alone muted
+			if isStandAloneMutedNote(nextNoteidx) and not partOfNextPlayGliss(nextNoteidx) and nextNoteidx:find('next') then
+				-- **limitation**: this always performs the target note in legato fashion, regardless of the active 
+				-- performance style or articulation marks, and it assumes the target note or chord matches the
+				-- priorNoteidx (if they don't match, the priorNoteidx controls what is played)
+				noteDur = noteDur + math.max(nextNoteidx:sppOffset(),1) - 1
+				nextNoteidx:find('prior')
+			end
+			
+			for j = 1, priorNoteidx:noteCount() or 0 do
+				local notenum = nwcplay.getNoteNumber(priorNoteidx:notePitchPos(j))+(inc*deltav)
+				local notevel = nwcplay.getNoteVelocity()
+				local bothsides = nextNoteidx:notePitchPos(j)
+				nwcplay.note(startSPP, bothsides and noteDur or dur, notenum, notevel)
+			end
+		end
+		
+		local pbChanges = math.floor((dur/2) - 2)
+		for i = 0, pbChanges do
+			local pbVal = pbStart + math.floor((i*(pbEnd-pbStart))/pbChanges)
+			local d1,d2 = math.floor(pbVal % 128),math.floor(pbVal/128)
+			nwcplay.midi(startSPP+i*2,'pitchBend',d1,d2)
+		end
+		nwcplay.midi(0,'pitchBend',0,64)
+	else
+		local interval1, interval2 = CountGlissIntervals(playback, v1, inc), CountGlissIntervals(playback, v2, inc)
+		local deltav = math.abs(interval1-interval2)
+		local deltaSPP = dur/deltav
+		if deltaSPP < 1 then return end
+		for i = 0, deltav-1 do
+			local interval = interval1+(inc*i)
+			local notepitch = GlissNoteFromInterval(playback, interval)
+			if ((i==0) and (notepitch~=v1)) then notepitch = v1 end
+			nwcplay.note(startSPP+(deltaSPP*i), deltaSPP,notepitch)
+		end
 	end
 end
 
@@ -220,5 +353,7 @@ return {
 	audit = _audit,
 	onChar = _onChar,
 	draw = _draw,
-	span = _span,
+	width = _draw,
+	span = function() return 1 end,
+	play = _play,
 }
